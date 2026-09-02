@@ -23,6 +23,7 @@ public sealed class Settings
     public bool InputSharingEnabled { get; set; } = true;
     public MacSide MacSide { get; set; } = MacSide.Left;
     public bool HideCursorWhileRemote { get; set; } = true;
+    public double RemoteMouseSpeed { get; set; } = 1.0;
 
     public bool AudioEnabled { get; set; } = true;
     public string? AudioDeviceId { get; set; }

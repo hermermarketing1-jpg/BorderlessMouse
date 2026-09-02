@@ -17,6 +17,8 @@ public sealed class InputCapture : IDisposable
 {
     private readonly LowLevelHooks _hooks = new();
     private readonly ControlClient _client;
+    private NativeInputWindow? _native;
+    private double _speedRemainderX, _speedRemainderY;
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _keysDown = new();
     private POINT _parked;
     private RECT _leaveMonitor;
@@ -31,7 +33,13 @@ public sealed class InputCapture : IDisposable
 
     public bool Enabled { get; set; } = true;
     public MacSide Side { get; set; } = MacSide.Left;
+    /// <summary>Ukrywaj kursor Windows podczas sterowania Makiem.</summary>
+    public bool HideCursorWhileRemote { get; set; } = true;
+    /// <summary>Mnożnik surowych delt myszy (Raw Input nie ma akceleracji Windows).</summary>
+    public double RemoteMouseSpeed { get; set; } = 1.0;
     public bool IsRemote { get; private set; }
+    /// <summary>true = delty z Raw Input (kursor zostaje przy krawędzi); false = tryb awaryjny z parkowaniem na środku.</summary>
+    public bool UsingRawInput => _native?.IsRawInputActive == true;
 
     /// <summary>true = kursor przeszedł na Maca, false = wrócił. Wątek UI.</summary>
     public event Action<bool>? RemoteChanged;
@@ -50,7 +58,11 @@ public sealed class InputCapture : IDisposable
     {
         if (_hooks.IsInstalled) return;
         _hooks.Install();
-        Dispatcher.UIThread.Post(() => Log?.Invoke("Hooki klawiatury i myszy aktywne"));
+        EnsureNativeWindow();
+        var raw = _native?.RegisterRawMouse() == true;
+        Dispatcher.UIThread.Post(() => Log?.Invoke(raw
+            ? "Hooki aktywne, ruch myszy z Raw Input (kursor zostaje przy krawędzi)"
+            : "Hooki aktywne, Raw Input niedostępny – tryb awaryjny z parkowaniem kursora"));
     }
 
     public void UninstallHooks()
@@ -58,9 +70,40 @@ public sealed class InputCapture : IDisposable
         if (IsRemote) ReturnToLocal(0.5f, sendRelease: true);
         if (!_hooks.IsInstalled) return;
         _hooks.Uninstall();
+        _native?.UnregisterRawMouse();
         _keysDown.Clear();
         RestoreCursor();
         Dispatcher.UIThread.Post(() => Log?.Invoke("Hooki klawiatury i myszy wyłączone"));
+    }
+
+    private void EnsureNativeWindow()
+    {
+        if (_native is not null) return;
+        try
+        {
+            _native = new NativeInputWindow();
+            _native.RawMouseMove += OnRawMouseMove;
+        }
+        catch (Exception ex)
+        {
+            Dispatcher.UIThread.Post(() => Log?.Invoke("Okno Raw Input nie powstało: " + ex.Message));
+        }
+    }
+
+    /// <summary>Surowa delta z WM_INPUT (wątek UI). W trybie zdalnym idzie do Maca.</summary>
+    private void OnRawMouseMove(int dx, int dy)
+    {
+        if (!IsRemote) return;
+        var speed = RemoteMouseSpeed <= 0 ? 1.0 : RemoteMouseSpeed;
+        _speedRemainderX += dx * speed;
+        _speedRemainderY += dy * speed;
+        var sx = (int)Math.Truncate(_speedRemainderX);
+        var sy = (int)Math.Truncate(_speedRemainderY);
+        _speedRemainderX -= sx;
+        _speedRemainderY -= sy;
+        if (sx == 0 && sy == 0) return;
+        _client.SendMouseMove(sx, sy);
+        Interlocked.Increment(ref _remoteMoves);
     }
 
     /// <summary>Przełącza ręcznie (Scroll Lock).</summary>
@@ -92,8 +135,10 @@ public sealed class InputCapture : IDisposable
         {
             case WM_MOUSEMOVE:
             {
-                // Ruch, który ląduje dokładnie w punkcie parkowania, to nasz własny warp
-                // (SetCursorPos) – ignorujemy go, jak Barrier/Synergy.
+                // Z Raw Input delty przychodzą przez WM_INPUT – tu tylko blokujemy ruch,
+                // żeby kursor Windows został tam, gdzie przekroczył krawędź.
+                if (UsingRawInput) return true;
+                // --- tryb awaryjny (bez Raw Input): delta z pozycji + parkowanie na środku ---
                 if (d.pt.X == _parked.X && d.pt.Y == _parked.Y) return true;
                 // Delta względem faktycznej pozycji kursora: działa niezależnie od tego,
                 // czy system przesunął kursor mimo zablokowania zdarzenia.
@@ -180,19 +225,29 @@ public sealed class InputCapture : IDisposable
         Interlocked.Exchange(ref _remoteMoves, 0);
         LastEnterUtc = DateTime.UtcNow;
         ReleaseLocalKeys();
+        _speedRemainderX = _speedRemainderY = 0;
         _client.SendEnter(entryEdge, ratio);
-        _parked = new POINT
+        if (UsingRawInput)
         {
-            X = GetSystemMetrics(SM_CXSCREEN) / 2,
-            Y = GetSystemMetrics(SM_CYSCREEN) / 2,
-        };
-        SetCursorPos(_parked.X, _parked.Y);
+            // kursor zostaje tam, gdzie jest (przy krawędzi) – hook blokuje dalsze ruchy
+            GetCursorPos(out _parked);
+        }
+        else
+        {
+            // tryb awaryjny: delty liczone z pozycji, więc kursor musi stać daleko od krawędzi
+            _parked = new POINT
+            {
+                X = GetSystemMetrics(SM_CXSCREEN) / 2,
+                Y = GetSystemMetrics(SM_CYSCREEN) / 2,
+            };
+            SetCursorPos(_parked.X, _parked.Y);
+        }
         Dispatcher.UIThread.Post(() =>
         {
             if (!IsRemote) return;
-            RemoteChanged?.Invoke(true);   // pokazuje przykrywkę pod zaparkowanym kursorem
-            HideCursor();
-            Log?.Invoke($"Kursor przeszedł na Maca (krawędź {Side}, ratio {ratio:0.00})");
+            RemoteChanged?.Invoke(true);
+            if (HideCursorWhileRemote) HideCursor();
+            Log?.Invoke($"Kursor przeszedł na Maca (krawędź {Side}, ratio {ratio:0.00}, {(UsingRawInput ? "Raw Input" : "tryb awaryjny")})");
         });
     }
 
@@ -200,8 +255,10 @@ public sealed class InputCapture : IDisposable
     {
         if (_cursorHidden) return;
         _cursorHidden = true;
+        // okno z pustym kursorem klasy pod kursorem + licznik ShowCursor dla naszego wątku
+        _native?.ShowHiderAt(_parked.X, _parked.Y);
         ShowCursor(false);
-        // odświeżenie obrazu kursora nad przykrywką
+        // wstrzyknięty ruch (przechodzi przez hook) odświeża obraz kursora nad hiderem
         SetCursorPos(_parked.X, _parked.Y);
     }
 
@@ -210,6 +267,7 @@ public sealed class InputCapture : IDisposable
         if (!_cursorHidden) return;
         _cursorHidden = false;
         ShowCursor(true);
+        _native?.HideHider();
     }
 
     /// <summary>Wraca do sterowania lokalnego. ratio = pozycja wzdłuż krawędzi (z LEAVE Maca).</summary>
@@ -296,5 +354,7 @@ public sealed class InputCapture : IDisposable
     {
         UninstallHooks();
         _hooks.Dispose();
+        _native?.Dispose();
+        _native = null;
     }
 }

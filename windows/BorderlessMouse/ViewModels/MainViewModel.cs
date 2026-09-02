@@ -34,7 +34,6 @@ public partial class MainViewModel : ObservableObject
     private AudioPlayer? _player;
     private InputCapture? _capture;
     private JitterBufferProvider? _jitter;
-    private CoverWindow? _cover;
     private ClipboardSync? _clipboardSync;
     private readonly Updater _updater = new();
     private ReleaseInfo? _pendingRelease;
@@ -66,6 +65,7 @@ public partial class MainViewModel : ObservableObject
         _inputSharingEnabled = _settings.InputSharingEnabled;
         _selectedMacSide = MacSides.First(o => o.Value == _settings.MacSide);
         _hideCursorWhileRemote = _settings.HideCursorWhileRemote;
+        _remoteMouseSpeed = _settings.RemoteMouseSpeed;
         _audioEnabled = _settings.AudioEnabled;
         _jitterBufferMs = _settings.JitterBufferMs;
         _exclusiveMode = _settings.ExclusiveMode;
@@ -103,6 +103,7 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private bool _inputSharingEnabled;
     [ObservableProperty] private MacSideOption _selectedMacSide;
     [ObservableProperty] private bool _hideCursorWhileRemote;
+    [ObservableProperty] [NotifyPropertyChangedFor(nameof(RemoteMouseSpeedLabel))] private double _remoteMouseSpeed;
     [ObservableProperty] private bool _audioEnabled;
     [ObservableProperty] private AudioDeviceInfo _selectedAudioDevice;
     [ObservableProperty] [NotifyPropertyChangedFor(nameof(JitterBufferLabel))] private double _jitterBufferMs;
@@ -146,6 +147,7 @@ public partial class MainViewModel : ObservableObject
     public string VersionLabel => $"Wersja {Updater.CurrentVersion}";
 
     public string ConnectButtonText => IsConnected || IsConnecting ? "Rozłącz" : "Połącz";
+    public string RemoteMouseSpeedLabel => $"{RemoteMouseSpeed:0.00}× – Raw Input nie ma akceleracji Windows, więc dostrój tempo kursora na Macu.";
     public string JitterBufferLabel => $"{(int)JitterBufferMs} ms – mniej = niższe opóźnienie, więcej = odporność na zakłócenia.";
 
     private static void Post(Action action) => Dispatcher.UIThread.Post(action);
@@ -166,11 +168,6 @@ public partial class MainViewModel : ObservableObject
             Log("Discovery nie wystartowało: " + ex.Message);
         }
         _statsTimer.Start();
-        if (OperatingSystem.IsWindows())
-        {
-            // tworzymy przykrywkę z wyprzedzeniem – pokazanie jej później jest tanie
-            try { _cover ??= new CoverWindow(); } catch (Exception ex) { Log("Nie można utworzyć okna-przykrywki: " + ex.Message); }
-        }
         if (AutoConnect && !string.IsNullOrWhiteSpace(HostAddress))
         {
             BeginConnect();
@@ -289,7 +286,6 @@ public partial class MainViewModel : ObservableObject
         _capture = null;
         _client.Disconnect(null);
         _discovery.Stop();
-        _cover?.Close();
         SaveSettings();
     }
 
@@ -377,7 +373,6 @@ public partial class MainViewModel : ObservableObject
         IsConnected = false;
         CursorOnMac = false;
         _capture?.ReturnToLocal(0.5f, sendRelease: false);
-        HideCover();
         ApplyHookState(); // bez połączenia hooki są zbędne
         StopAudio(notifyMac: false);
         MacStatusText = "";
@@ -501,12 +496,13 @@ public partial class MainViewModel : ObservableObject
             _capture.RemoteChanged += remote =>
             {
                 CursorOnMac = remote;
-                if (remote && HideCursorWhileRemote) ShowCover(); else HideCover();
                 UpdateStatus();
             };
         }
         _capture.Enabled = InputSharingEnabled;
         _capture.Side = SelectedMacSide.Value;
+        _capture.HideCursorWhileRemote = HideCursorWhileRemote;
+        _capture.RemoteMouseSpeed = RemoteMouseSpeed;
         ApplyHookState();
     }
 
@@ -522,20 +518,6 @@ public partial class MainViewModel : ObservableObject
         {
             Log("Błąd hooków: " + ex.Message);
         }
-    }
-
-    private void ShowCover()
-    {
-        if (!OperatingSystem.IsWindows()) return;
-        _cover ??= new CoverWindow();
-        var x = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXSCREEN) / 2;
-        var y = NativeMethods.GetSystemMetrics(NativeMethods.SM_CYSCREEN) / 2;
-        _cover.ShowAt(x, y);
-    }
-
-    private void HideCover()
-    {
-        if (_cover is { IsVisible: true }) _cover.Hide();
     }
 
     // ------------------------------------------------------------------
@@ -669,7 +651,19 @@ public partial class MainViewModel : ObservableObject
     partial void OnHostAddressChanged(string value) { _settings.HostAddress = value.Trim(); SaveSettings(); }
     partial void OnDeviceNameChanged(string value) { _settings.DeviceName = value; SaveSettings(); }
     partial void OnAutoConnectChanged(bool value) { _settings.AutoConnect = value; SaveSettings(); }
-    partial void OnHideCursorWhileRemoteChanged(bool value) { _settings.HideCursorWhileRemote = value; SaveSettings(); }
+    partial void OnHideCursorWhileRemoteChanged(bool value)
+    {
+        _settings.HideCursorWhileRemote = value;
+        SaveSettings();
+        if (_capture is not null) _capture.HideCursorWhileRemote = value;
+    }
+
+    partial void OnRemoteMouseSpeedChanged(double value)
+    {
+        _settings.RemoteMouseSpeed = value;
+        SaveSettings();
+        if (_capture is not null) _capture.RemoteMouseSpeed = value;
+    }
 
     partial void OnControlPortTextChanged(string value)
     {

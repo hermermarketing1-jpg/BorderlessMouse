@@ -94,8 +94,10 @@ Aplikacja ma też ikonę w pasku menu z szybkimi przełącznikami.
    **Sieci prywatne**; bez tego nie dotrze dźwięk UDP).
 2. Mac pojawi się na liście **Znalezione Maki** – kliknij go (albo wpisz IP) i **Połącz**.
 3. Ustaw, po której stronie ekranu stoi Mac (domyślnie *po lewej*).
-4. Przesuń mysz przez tę krawędź – kursor przechodzi na Maca. Powrót: przesuń kursor przez
-   przeciwną krawędź Maca albo naciśnij **Scroll Lock** (działa w obie strony).
+4. Przesuń mysz przez tę krawędź – kursor przechodzi na Maca, a kursor Windows zostaje
+   (ukryty) w miejscu przekroczenia. Ruch myszy jest czytany przez Raw Input, więc nie ma
+   akceleracji Windows; tempo dostroisz suwakiem „Czułość myszy na Macu”. Powrót: przesuń
+   kursor przez przeciwną krawędź Maca albo naciśnij **Scroll Lock** (działa w obie strony).
 5. Dźwięk: włączony domyślnie; wybierz urządzenie wyjściowe i ewentualnie zmniejsz bufor.
 6. Schowek: włączony domyślnie po obu stronach (karta **Schowek**); synchronizowany jest
    tekst do 1 MB. Obrazy i pliki nie są przesyłane.
@@ -179,10 +181,10 @@ assets/logo/                 – wspólne logo + skrypt generujący .icns/.ico/.
 .github/workflows/           – CI (build obu aplikacji) i Release (tag v* → GitHub Release)
 windows/
   BorderlessMouse/
-    Input/      NativeMethods, LowLevelHooks, InputCapture (maszyna stanów)
+    Input/      NativeMethods, LowLevelHooks, NativeInputWindow (Raw Input + hider), InputCapture
     Net/        ControlClient (TCP), Discovery (UDP), AudioReceiver (UDP), ClipboardSync, Updater
     Audio/      JitterBufferProvider, AudioPlayer (NAudio/WASAPI)
-    Views/      MainWindow.axaml (AppWindow + SettingsExpander), CoverWindow
+    Views/      MainWindow.axaml (AppWindow + SettingsExpander)
     ViewModels/ MainViewModel
 ```
 

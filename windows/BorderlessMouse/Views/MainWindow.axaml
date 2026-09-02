@@ -107,7 +107,13 @@
                         <ComboBox ItemsSource="{Binding MacSides}" SelectedItem="{Binding SelectedMacSide}" MinWidth="160" />
                     </ui:SettingsExpanderItem.Footer>
                 </ui:SettingsExpanderItem>
-                <ui:SettingsExpanderItem Content="Ukrywaj kursor podczas sterowania Makiem" Description="Kursor Windows jest parkowany pod niewidocznym oknem.">
+                <ui:SettingsExpanderItem Content="Czułość myszy na Macu" Description="{Binding RemoteMouseSpeedLabel}">
+                    <ui:SettingsExpanderItem.Footer>
+                        <Slider Minimum="0.25" Maximum="4" TickFrequency="0.25" IsSnapToTickEnabled="True"
+                                Value="{Binding RemoteMouseSpeed}" Width="220" />
+                    </ui:SettingsExpanderItem.Footer>
+                </ui:SettingsExpanderItem>
+                <ui:SettingsExpanderItem Content="Ukrywaj kursor podczas sterowania Makiem" Description="Kursor zostaje przy krawędzi, przez którą wyszedł, i znika pod niewidocznym oknem.">
                     <ui:SettingsExpanderItem.Footer>
                         <ToggleSwitch Classes="pl" IsChecked="{Binding HideCursorWhileRemote}" />
                     </ui:SettingsExpanderItem.Footer>
