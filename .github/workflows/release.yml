@@ -1,0 +1,74 @@
+name: Release
+
+# Wypuszczenie wersji: git tag v1.2.3 && git push --tags
+# Workflow buduje obie aplikacje, liczy sumy SHA-256 i tworzy GitHub Release,
+# z którego korzysta wbudowany auto-updater.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS (universal .app)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          cd macos
+          UNIVERSAL=1 VERSION="${GITHUB_REF_NAME#v}" BUILD_NUMBER="${GITHUB_RUN_NUMBER}" ./build.sh
+          ditto -c -k --keepParent build/BorderlessMouse.app BorderlessMouse-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: macos/BorderlessMouse-macOS.zip
+          if-no-files-found: error
+
+  windows:
+    name: Windows (x64, single file)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Publish
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          dotnet publish windows/BorderlessMouse/BorderlessMouse.csproj -c Release -r win-x64 `
+            --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:Version=$version -p:InformationalVersion=$version -o publish
+          Move-Item publish/BorderlessMouse.exe publish/BorderlessMouse-Windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: publish/BorderlessMouse-Windows-x64.exe
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum BorderlessMouse-macOS.zip BorderlessMouse-Windows-x64.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "BorderlessMouse $GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/BorderlessMouse-macOS.zip dist/BorderlessMouse-Windows-x64.exe dist/SHA256SUMS.txt

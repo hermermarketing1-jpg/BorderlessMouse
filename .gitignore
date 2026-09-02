@@ -1,0 +1,15 @@
+# macOS
+macos/build/
+macos/BorderlessMouse.xcodeproj/
+macos/*.xcworkspace/
+.DS_Store
+xcuserdata/
+DerivedData/
+
+# Windows / .NET
+windows/**/bin/
+windows/**/obj/
+windows/publish/
+*.user
+*.suo
+.vs/

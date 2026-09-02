@@ -1,0 +1,44 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Styles.Resources>
+        <ResourceDictionary>
+            <SolidColorBrush x:Key="StatusGreen" Color="#34C759" />
+            <SolidColorBrush x:Key="StatusOrange" Color="#FF9F0A" />
+            <SolidColorBrush x:Key="StatusRed" Color="#FF453A" />
+            <SolidColorBrush x:Key="StatusGray" Color="#8E8E93" />
+            <FontFamily x:Key="IconFont">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
+        </ResourceDictionary>
+    </Styles.Resources>
+
+    <!-- Nagłówek sekcji jak w Ustawieniach Windows 11 -->
+    <Style Selector="TextBlock.section">
+        <Setter Property="Theme" Value="{StaticResource BodyStrongTextBlockStyle}" />
+        <Setter Property="Margin" Value="0,18,0,6" />
+    </Style>
+
+    <Style Selector="TextBlock.secondary">
+        <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style Selector="TextBlock.mono">
+        <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Menlo, monospace" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style Selector="Border.pill">
+        <Setter Property="Background" Value="{DynamicResource ControlFillColorDefaultBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource ControlStrokeColorDefaultBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="999" />
+        <Setter Property="Padding" Value="12,6" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="ToggleSwitch.pl">
+        <Setter Property="OnContent" Value="Wł." />
+        <Setter Property="OffContent" Value="Wył." />
+    </Style>
+</Styles>

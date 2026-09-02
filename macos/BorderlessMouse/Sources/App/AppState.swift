@@ -1,0 +1,181 @@
+import AppKit
+import Foundation
+import OSLog
+import SwiftUI
+
+struct LogEntry: Identifiable {
+    let id = UUID()
+    let time: Date
+    let text: String
+}
+
+@MainActor
+final class AppState: ObservableObject {
+    static let shared = AppState()
+
+    @Published var settings: Settings {
+        didSet {
+            guard settings != oldValue else { return }
+            settings.save()
+            engine.update(config: settings.engineConfig)
+        }
+    }
+
+    @Published private(set) var isListening = false
+    @Published private(set) var listenError: String?
+    @Published private(set) var peer: ControlServer.PeerInfo?
+    @Published private(set) var cursorOnMac = false
+    @Published private(set) var audioStreaming = false
+    @Published private(set) var audioDescription = ""
+    @Published private(set) var audioError: String?
+    @Published private(set) var audioLevel: Float = 0
+    @Published private(set) var audioPackets: UInt64 = 0
+    @Published private(set) var audioSendErrors: UInt64 = 0
+    @Published private(set) var accessibilityGranted = false
+    @Published private(set) var clipboardStatus = "Brak synchronizacji w tej sesji"
+    @Published private(set) var log: [LogEntry] = []
+
+    let engine: Engine
+    let updater = Updater()
+    private var permissionTimer: Timer?
+    private var updateTimer: Timer?
+    private let logger = Logger(subsystem: "com.borderlessmouse.mac", category: "app")
+
+    private init() {
+        let s = Settings.load()
+        settings = s
+        engine = Engine(config: s.engineConfig)
+        engine.onEvent = { [weak self] event in
+            Task { @MainActor in self?.apply(event) }
+        }
+        accessibilityGranted = InputInjector.isAccessibilityTrusted
+        engine.setAccessibilityGranted(accessibilityGranted)
+        engine.start()
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshPermissions() }
+        }
+        scheduleUpdateChecks()
+    }
+
+    private func scheduleUpdateChecks() {
+        // pierwsze sprawdzenie chwilę po starcie, potem co 6 godzin
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard let self, self.settings.autoCheckUpdates else { return }
+            await self.updater.check(silent: true)
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.settings.autoCheckUpdates else { return }
+                await self.updater.check(silent: true)
+            }
+        }
+    }
+
+    func checkForUpdates() {
+        Task { @MainActor in await updater.check(silent: false) }
+    }
+
+    func installUpdate() {
+        Task { @MainActor in await updater.install(codesignIdentity: settings.codesignIdentity) }
+    }
+
+    var statusSummary: (text: String, color: Color) {
+        if !isListening { return ("Nie nasłuchuje", .red) }
+        if let peer {
+            if cursorOnMac { return ("Sterowanie z \(peer.name)", .green) }
+            return ("Połączono z \(peer.name)", .green) }
+        return ("Czeka na Windows", .orange)
+    }
+
+    // MARK: - Akcje
+
+    func refreshPermissions() {
+        let granted = InputInjector.isAccessibilityTrusted
+        if granted != accessibilityGranted {
+            accessibilityGranted = granted
+            engine.setAccessibilityGranted(granted)
+            appendLog(granted ? "Uprawnienie Dostępność nadane" : "Brak uprawnienia Dostępność")
+        }
+    }
+
+    func requestAccessibility() {
+        InputInjector.requestAccessibility()
+        refreshPermissions()
+    }
+
+    func openAccessibilitySettings() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+    }
+
+    func openAudioCaptureSettings() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")
+    }
+
+    func disconnectPeer() { engine.disconnectPeer() }
+    func stopAudio() { engine.stopAudio() }
+    func restartServer() { engine.restartServer() }
+
+    func shutdown() {
+        permissionTimer?.invalidate()
+        updateTimer?.invalidate()
+        engine.stop()
+    }
+
+    private func open(_ url: String) {
+        if let u = URL(string: url) { NSWorkspace.shared.open(u) }
+    }
+
+    // MARK: - Zdarzenia z silnika
+
+    private func apply(_ event: Engine.Event) {
+        switch event {
+        case let .listening(ok, error):
+            isListening = ok
+            listenError = error
+        case let .peerConnected(info):
+            peer = info
+        case .peerDisconnected:
+            peer = nil
+            cursorOnMac = false
+        case let .cursorOnMac(active):
+            cursorOnMac = active
+        case let .audioStarted(desc):
+            audioStreaming = true
+            audioDescription = desc
+            audioError = nil
+            audioPackets = 0
+            audioSendErrors = 0
+        case .audioStopped:
+            audioStreaming = false
+            audioDescription = ""
+            audioLevel = 0
+        case let .audioError(message):
+            audioStreaming = false
+            audioError = message
+        case let .audioLevel(level):
+            audioLevel = level
+        case let .audioStats(packets, errors):
+            audioPackets = packets
+            audioSendErrors = errors
+        case let .clipboardSent(n):
+            clipboardStatus = "Wysłano \(n) zn. do Windowsa · \(Self.timeFormatter.string(from: Date()))"
+        case let .clipboardReceived(n):
+            clipboardStatus = "Odebrano \(n) zn. z Windowsa · \(Self.timeFormatter.string(from: Date()))"
+        case let .log(text):
+            appendLog(text)
+        }
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    private func appendLog(_ text: String) {
+        logger.notice("\(text, privacy: .public)")
+        log.append(LogEntry(time: Date(), text: text))
+        if log.count > 200 { log.removeFirst(log.count - 200) }
+    }
+}

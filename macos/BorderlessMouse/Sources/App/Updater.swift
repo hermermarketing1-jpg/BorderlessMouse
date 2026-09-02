@@ -1,0 +1,246 @@
+import AppKit
+import CryptoKit
+import Foundation
+
+/// Auto-updater oparty o GitHub Releases: sprawdza najnowszy tag, pobiera
+/// `BorderlessMouse-macOS.zip`, weryfikuje SHA-256 (SHA256SUMS.txt),
+/// opcjonalnie podpisuje lokalnym certyfikatem i podmienia bundle.
+@MainActor
+final class Updater: ObservableObject {
+    static let owner = "hermermarketing1-jpg"
+    static let repo = "BorderlessMouse"
+    static let assetName = "BorderlessMouse-macOS.zip"
+    static let checksumsName = "SHA256SUMS.txt"
+
+    struct Release: Equatable {
+        let version: String
+        let tag: String
+        let notes: String
+        let pageURL: URL
+        let assetURL: URL
+        let checksumsURL: URL?
+    }
+
+    enum State: Equatable {
+        case idle
+        case checking
+        case upToDate(String)
+        case available(Release)
+        case downloading(Double)
+        case installing
+        case failed(String)
+    }
+
+    @Published private(set) var state: State = .idle
+
+    static var currentVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
+    // MARK: - Sprawdzanie
+
+    func check(silent: Bool) async {
+        if case .downloading = state { return }
+        if case .installing = state { return }
+        state = .checking
+        do {
+            guard let release = try await fetchLatest() else {
+                state = silent ? .idle : .failed("Brak wydań na GitHubie")
+                return
+            }
+            if Self.isNewer(release.version, than: Self.currentVersion) {
+                state = .available(release)
+            } else {
+                state = .upToDate(Self.timeFormatter.string(from: Date()))
+            }
+        } catch {
+            state = silent ? .idle : .failed(error.localizedDescription)
+        }
+    }
+
+    private func fetchLatest() async throws -> Release? {
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.owner)/\(Self.repo)/releases/latest")!)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("BorderlessMouse-macOS/\(Self.currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 15
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { return nil }
+        if http.statusCode == 404 { return nil }
+        guard http.statusCode == 200 else { throw UpdaterError.http(http.statusCode) }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag = json["tag_name"] as? String,
+              let page = (json["html_url"] as? String).flatMap(URL.init(string:)),
+              let assets = json["assets"] as? [[String: Any]] else { throw UpdaterError.malformed }
+        var assetURL: URL?
+        var checksumsURL: URL?
+        for asset in assets {
+            guard let name = asset["name"] as? String,
+                  let url = (asset["browser_download_url"] as? String).flatMap(URL.init(string:)) else { continue }
+            if name == Self.assetName { assetURL = url }
+            if name == Self.checksumsName { checksumsURL = url }
+        }
+        guard let assetURL else { return nil }
+        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        return Release(version: version, tag: tag, notes: (json["body"] as? String) ?? "",
+                       pageURL: page, assetURL: assetURL, checksumsURL: checksumsURL)
+    }
+
+    static func isNewer(_ candidate: String, than current: String) -> Bool {
+        func parts(_ v: String) -> [Int] {
+            v.split(whereSeparator: { $0 == "." || $0 == "-" }).prefix(3).map { Int($0) ?? 0 }
+        }
+        let a = parts(candidate), b = parts(current)
+        for i in 0..<max(a.count, b.count) {
+            let x = i < a.count ? a[i] : 0
+            let y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    // MARK: - Instalacja
+
+    func install(codesignIdentity: String) async {
+        guard case .available(let release) = state else { return }
+        state = .downloading(0)
+        do {
+            let zipURL = try await download(release.assetURL) { [weak self] progress in
+                Task { @MainActor in self?.state = .downloading(progress) }
+            }
+            state = .installing
+            if let checksumsURL = release.checksumsURL {
+                try await verifyChecksum(of: zipURL, against: checksumsURL)
+            }
+            let staging = zipURL.deletingLastPathComponent().appendingPathComponent("unpacked", isDirectory: true)
+            try? FileManager.default.removeItem(at: staging)
+            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+            try run("/usr/bin/ditto", ["-x", "-k", zipURL.path, staging.path])
+            guard let newApp = try FileManager.default.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil)
+                .first(where: { $0.pathExtension == "app" }) else { throw UpdaterError.noAppInArchive }
+            _ = try? run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", newApp.path])
+            let identity = codesignIdentity.trimmingCharacters(in: .whitespaces)
+            if !identity.isEmpty {
+                try run("/usr/bin/codesign", ["--force", "--deep", "--sign", identity,
+                                             "--entitlements", Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/BorderlessMouse.entitlements").path,
+                                             newApp.path], allowFailure: true)
+            }
+            try swapAndRelaunch(newApp: newApp)
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    private func download(_ url: URL, progress: @escaping (Double) -> Void) async throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("BorderlessMouse-update-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent(Self.assetName)
+        var request = URLRequest(url: url)
+        request.setValue("BorderlessMouse-macOS/\(Self.currentVersion)", forHTTPHeaderField: "User-Agent")
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw UpdaterError.http((response as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        let total = Double(http.expectedContentLength)
+        var received = 0
+        var buffer = [UInt8]()
+        buffer.reserveCapacity(1 << 20)
+        let handle: FileHandle
+        FileManager.default.createFile(atPath: dest.path, contents: nil)
+        handle = try FileHandle(forWritingTo: dest)
+        defer { try? handle.close() }
+        var lastReport = Date()
+        for try await byte in bytes {
+            buffer.append(byte)
+            if buffer.count >= 1 << 20 {
+                handle.write(Data(buffer))
+                received += buffer.count
+                buffer.removeAll(keepingCapacity: true)
+                if total > 0, Date().timeIntervalSince(lastReport) > 0.1 {
+                    lastReport = Date()
+                    progress(Double(received) / total)
+                }
+            }
+        }
+        if !buffer.isEmpty { handle.write(Data(buffer)); received += buffer.count }
+        progress(1)
+        return dest
+    }
+
+    private func verifyChecksum(of file: URL, against checksumsURL: URL) async throws {
+        let (data, _) = try await URLSession.shared.data(from: checksumsURL)
+        let text = String(decoding: data, as: UTF8.self)
+        guard let line = text.split(separator: "\n").first(where: { $0.hasSuffix(Self.assetName) }),
+              let expected = line.split(separator: " ").first else { return } // brak wpisu = nie weryfikujemy
+        let digest = SHA256.hash(data: try Data(contentsOf: file)).map { String(format: "%02x", $0) }.joined()
+        guard digest == String(expected).lowercased() else { throw UpdaterError.checksumMismatch }
+    }
+
+    private func swapAndRelaunch(newApp: URL) throws {
+        let current = Bundle.main.bundleURL
+        let parent = current.deletingLastPathComponent()
+        guard FileManager.default.isWritableFile(atPath: parent.path) else {
+            throw UpdaterError.notWritable(parent.path)
+        }
+        let script = """
+        #!/bin/sh
+        PID="$1"; NEW="$2"; APP="$3"
+        while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
+        OLD="$APP.old-$$"
+        mv "$APP" "$OLD" || exit 1
+        if mv "$NEW" "$APP"; then rm -rf "$OLD"; else mv "$OLD" "$APP"; exit 1; fi
+        open -n "$APP"
+        """
+        let scriptURL = newApp.deletingLastPathComponent().appendingPathComponent("swap.sh")
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [scriptURL.path, String(ProcessInfo.processInfo.processIdentifier), newApp.path, current.path]
+        try process.run()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NSApp.terminate(nil)
+        }
+    }
+
+    @discardableResult
+    private func run(_ tool: String, _ args: [String], allowFailure: Bool = false) throws -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: tool)
+        p.arguments = args
+        let err = Pipe()
+        p.standardError = err
+        p.standardOutput = Pipe()
+        try p.run()
+        p.waitUntilExit()
+        if p.terminationStatus != 0 && !allowFailure {
+            let msg = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            throw UpdaterError.tool(tool, msg.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return p.terminationStatus
+    }
+
+    enum UpdaterError: LocalizedError {
+        case http(Int)
+        case malformed
+        case noAppInArchive
+        case checksumMismatch
+        case notWritable(String)
+        case tool(String, String)
+
+        var errorDescription: String? {
+            switch self {
+            case .http(let code): return "GitHub odpowiedział kodem \(code)"
+            case .malformed: return "Nieoczekiwana odpowiedź GitHuba"
+            case .noAppInArchive: return "W archiwum nie ma aplikacji"
+            case .checksumMismatch: return "Suma SHA-256 pobranego pliku nie zgadza się z wydaniem"
+            case .notWritable(let path): return "Brak prawa zapisu do \(path) – przenieś aplikację np. do ~/Applications"
+            case .tool(let tool, let msg): return "\(tool): \(msg)"
+            }
+        }
+    }
+}
