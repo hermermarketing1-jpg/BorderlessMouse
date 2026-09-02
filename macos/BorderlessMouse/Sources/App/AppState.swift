@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import OSLog
 import SwiftUI
@@ -39,6 +40,7 @@ final class AppState: ObservableObject {
     let updater = Updater()
     private var permissionTimer: Timer?
     private var updateTimer: Timer?
+    private var updaterSink: AnyCancellable?
     private let logger = Logger(subsystem: "com.borderlessmouse.mac", category: "app")
 
     private init() {
@@ -55,6 +57,17 @@ final class AppState: ObservableObject {
             Task { @MainActor in self?.refreshPermissions() }
         }
         scheduleUpdateChecks()
+        updaterSink = updater.$state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                switch state {
+                case .available(let r): self?.appendLog("Dostępna aktualizacja \(r.version) (\(r.tag))")
+                case .upToDate: self?.appendLog("Aktualizacje: masz najnowszą wersję \(Updater.currentVersion)")
+                case .failed(let msg): self?.appendLog("Aktualizacje: \(msg)")
+                case .installing: self?.appendLog("Aktualizacja pobrana, podmiana i restart…")
+                default: break
+                }
+            }
     }
 
     private func scheduleUpdateChecks() {
